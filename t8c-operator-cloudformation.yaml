@@ -1,0 +1,306 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template to deploy Turbonomic Platform Operator (t8c-operator) to an existing EKS cluster'
+
+Parameters:
+  EksClusterName:
+    Type: String
+    Description: Name of the existing EKS cluster where Turbonomic will be deployed
+    
+  KubernetesNamespace:
+    Type: String
+    Description: Kubernetes namespace where Turbonomic will be deployed
+    Default: turbonomic
+    
+  OperatorImageRepository:
+    Type: String
+    Description: Container image repository for the t8c-operator
+    Default: icr.io/cpopen/t8c-operator
+    
+  OperatorImageTag:
+    Type: String
+    Description: Container image tag for the t8c-operator
+    Default: 42.76
+    
+  TurbonomicImageRepository:
+    Type: String
+    Description: Container image repository for Turbonomic components
+    Default: icr.io/cpopen/turbonomic
+    
+  TurbonomicImageTag:
+    Type: String
+    Description: Container image tag for Turbonomic components
+    Default: 8.15.4
+
+Resources:
+  # IAM Role for EKS to access AWS resources
+  TurbonomicOperatorRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonEKSClusterPolicy'
+      Path: /
+      
+  # Custom resource to create Kubernetes namespace
+  TurbonomicNamespace:
+    Type: 'Custom::KubernetesResource'
+    Properties:
+      ServiceToken: !GetAtt KubernetesResourceFunction.Arn
+      ClusterName: !Ref EksClusterName
+      ManifestTemplate: 'k8s-manifests/namespace.yaml'
+      Variables:
+        KubernetesNamespace: !Ref KubernetesNamespace
+          
+  # Custom resource to create Kubernetes service account
+  TurbonomicServiceAccount:
+    Type: 'Custom::KubernetesResource'
+    DependsOn: TurbonomicNamespace
+    Properties:
+      ServiceToken: !GetAtt KubernetesResourceFunction.Arn
+      ClusterName: !Ref EksClusterName
+      ManifestTemplate: 'k8s-manifests/service-account.yaml'
+      Variables:
+        KubernetesNamespace: !Ref KubernetesNamespace
+          
+  # Custom resource to create Kubernetes role
+  TurbonomicRole:
+    Type: 'Custom::KubernetesResource'
+    DependsOn: TurbonomicNamespace
+    Properties:
+      ServiceToken: !GetAtt KubernetesResourceFunction.Arn
+      ClusterName: !Ref EksClusterName
+      ManifestTemplate: 'k8s-manifests/role.yaml'
+      Variables:
+        KubernetesNamespace: !Ref KubernetesNamespace
+          
+  # Custom resource to create Kubernetes role binding
+  TurbonomicRoleBinding:
+    Type: 'Custom::KubernetesResource'
+    DependsOn: 
+      - TurbonomicNamespace
+      - TurbonomicServiceAccount
+      - TurbonomicRole
+    Properties:
+      ServiceToken: !GetAtt KubernetesResourceFunction.Arn
+      ClusterName: !Ref EksClusterName
+      ManifestTemplate: 'k8s-manifests/role-binding.yaml'
+      Variables:
+        KubernetesNamespace: !Ref KubernetesNamespace
+          
+  # Custom resource to create Kubernetes cluster role
+  TurbonomicClusterRole:
+    Type: 'Custom::KubernetesResource'
+    Properties:
+      ServiceToken: !GetAtt KubernetesResourceFunction.Arn
+      ClusterName: !Ref EksClusterName
+      ManifestTemplate: 'k8s-manifests/cluster-role.yaml'
+          
+  # Custom resource to create Kubernetes cluster role binding
+  TurbonomicClusterRoleBinding:
+    Type: 'Custom::KubernetesResource'
+    DependsOn: 
+      - TurbonomicNamespace
+      - TurbonomicServiceAccount
+      - TurbonomicClusterRole
+    Properties:
+      ServiceToken: !GetAtt KubernetesResourceFunction.Arn
+      ClusterName: !Ref EksClusterName
+      ManifestTemplate: 'k8s-manifests/cluster-role-binding.yaml'
+      Variables:
+        KubernetesNamespace: !Ref KubernetesNamespace
+          
+  # Custom resource to deploy the CRD
+  TurbonomicCRD:
+    Type: 'Custom::KubernetesResource'
+    Properties:
+      ServiceToken: !GetAtt KubernetesResourceFunction.Arn
+      ClusterName: !Ref EksClusterName
+      ManifestTemplate: 'k8s-manifests/crd.yaml'
+              
+  # Custom resource to deploy the operator
+  TurbonomicOperator:
+    Type: 'Custom::KubernetesResource'
+    DependsOn: 
+      - TurbonomicNamespace
+      - TurbonomicServiceAccount
+      - TurbonomicRoleBinding
+      - TurbonomicClusterRoleBinding
+      - TurbonomicCRD
+    Properties:
+      ServiceToken: !GetAtt KubernetesResourceFunction.Arn
+      ClusterName: !Ref EksClusterName
+      ManifestTemplate: 'k8s-manifests/operator.yaml'
+      Variables:
+        KubernetesNamespace: !Ref KubernetesNamespace
+        OperatorImageRepository: !Ref OperatorImageRepository
+        OperatorImageTag: !Ref OperatorImageTag
+                
+  # Custom resource to create the Turbonomic platform custom resource
+  TurbonomicPlatform:
+    Type: 'Custom::KubernetesResource'
+    DependsOn: 
+      - TurbonomicOperator
+    Properties:
+      ServiceToken: !GetAtt KubernetesResourceFunction.Arn
+      ClusterName: !Ref EksClusterName
+      ManifestTemplate: 'k8s-manifests/xl-release.yaml'
+      Variables:
+        KubernetesNamespace: !Ref KubernetesNamespace
+        TurbonomicImageRepository: !Ref TurbonomicImageRepository
+        TurbonomicImageTag: !Ref TurbonomicImageTag
+            
+  # Lambda function to apply Kubernetes resources
+  KubernetesResourceFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import logging
+          import cfnresponse
+          import base64
+          import yaml
+          import tempfile
+          import subprocess
+          import os
+          import string
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def handler(event, context):
+              logger.info('Received event: %s', json.dumps(event))
+              
+              # Initialize response
+              response_data = {}
+              physical_resource_id = event.get('PhysicalResourceId', context.log_stream_name)
+              
+              try:
+                  if event['RequestType'] in ['Create', 'Update']:
+                      cluster_name = event['ResourceProperties']['ClusterName']
+                      manifest_template = event['ResourceProperties']['ManifestTemplate']
+                      variables = event['ResourceProperties'].get('Variables', {})
+                      
+                      # Read the template file
+                      with open(manifest_template, 'r') as file:
+                          template_content = file.read()
+                      
+                      # Replace variables in the template
+                      template = string.Template(template_content)
+                      manifest = template.substitute(variables)
+                      
+                      # Get EKS cluster info
+                      eks_client = boto3.client('eks')
+                      cluster_info = eks_client.describe_cluster(name=cluster_name)
+                      
+                      # Write manifest to temporary file
+                      with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+                          temp_file.write(manifest)
+                          manifest_path = temp_file.name
+                      
+                      # Update kubeconfig
+                      update_kubeconfig_cmd = f"aws eks update-kubeconfig --name {cluster_name} --region {os.environ['AWS_REGION']}"
+                      subprocess.run(update_kubeconfig_cmd, shell=True, check=True)
+                      
+                      # Apply manifest
+                      apply_cmd = f"kubectl apply -f {manifest_path}"
+                      result = subprocess.run(apply_cmd, shell=True, capture_output=True, text=True)
+                      
+                      if result.returncode != 0:
+                          raise Exception(f"Failed to apply Kubernetes manifest: {result.stderr}")
+                      
+                      response_data['Output'] = result.stdout
+                      os.unlink(manifest_path)
+                      
+                  elif event['RequestType'] == 'Delete':
+                      cluster_name = event['ResourceProperties']['ClusterName']
+                      manifest_template = event['ResourceProperties']['ManifestTemplate']
+                      variables = event['ResourceProperties'].get('Variables', {})
+                      
+                      # Read the template file
+                      with open(manifest_template, 'r') as file:
+                          template_content = file.read()
+                      
+                      # Replace variables in the template
+                      template = string.Template(template_content)
+                      manifest = template.substitute(variables)
+                      
+                      # Write manifest to temporary file
+                      with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+                          temp_file.write(manifest)
+                          manifest_path = temp_file.name
+                      
+                      # Update kubeconfig
+                      update_kubeconfig_cmd = f"aws eks update-kubeconfig --name {cluster_name} --region {os.environ['AWS_REGION']}"
+                      subprocess.run(update_kubeconfig_cmd, shell=True, check=True)
+                      
+                      # Delete manifest
+                      delete_cmd = f"kubectl delete -f {manifest_path} --ignore-not-found=true"
+                      result = subprocess.run(delete_cmd, shell=True, capture_output=True, text=True)
+                      
+                      response_data['Output'] = result.stdout
+                      os.unlink(manifest_path)
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, physical_resource_id)
+              
+              except Exception as e:
+                  logger.error('Error: %s', str(e))
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)}, physical_resource_id)
+      
+  # IAM role for Lambda execution
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: EksAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'eks:DescribeCluster'
+                  - 'eks:ListClusters'
+                Resource: '*'
+        - PolicyName: AssumeEksRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sts:AssumeRole'
+                Resource: '*'
+
+Outputs:
+  TurbonomicNamespace:
+    Description: Kubernetes namespace where Turbonomic is deployed
+    Value: !Ref KubernetesNamespace
+    
+  TurbonomicOperatorDeployment:
+    Description: Name of the Turbonomic operator deployment
+    Value: t8c-operator
+    
+  TurbonomicPlatformResource:
+    Description: Name of the Turbonomic platform custom resource
+    Value: xl-release
+
+# Made with Bob
