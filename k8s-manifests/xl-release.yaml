@@ -1,0 +1,75 @@
+apiVersion: charts.helm.k8s.io/v1
+kind: Xl
+metadata:
+  name: xl-release
+  namespace: ${KubernetesNamespace}
+spec:
+  global:
+    repository: ${TurbonomicImageRepository}
+    tag: ${TurbonomicImageTag}
+    enableExternalSecrets: true
+  
+  # Component selector - Probes
+  actionscript:
+    enabled: true
+  appdynamics:
+    enabled: true
+  aws:
+    enabled: true
+  azure:
+    enabled: true
+  dynatrace:
+    enabled: true
+  gcp:
+    enabled: true
+  hpe3par:
+    enabled: true
+  hyperv:
+    enabled: true
+  ibmstorage-flashsystem:
+    enabled: true
+  kubeturbo:
+    enabled: true
+  netapp:
+    enabled: true
+  nutanix:
+    enabled: true
+  oneview:
+    enabled: true
+  prometheus-mysql-exporter:
+    enabled: true
+    mysql:
+      user: root
+      pass: vmturbo
+  prometheus:
+    enabled: true
+  prometurbo:
+    enabled: true
+  pure:
+    enabled: true
+  vcenter:
+    enabled: true
+  vmax:
+    enabled: true
+  vmm:
+    enabled: true
+  wmi:
+    enabled: true
+  snmp:
+    enabled: true
+  mssql:
+    enabled: true
+  newrelic:
+    enabled: true
+  udt:
+    enabled: true
+  instana:
+    enabled: true
+  datadog:
+    enabled: true
+  powervm:
+    enabled: true
+  metrics-processor:
+    enabled: true
+
+# Made with Bob

@@ -1,0 +1,14 @@
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: t8c-operator
+subjects:
+- kind: ServiceAccount
+  name: t8c-operator
+  namespace: ${KubernetesNamespace}
+roleRef:
+  kind: ClusterRole
+  name: t8c-operator
+  apiGroup: rbac.authorization.k8s.io
+
+# Made with Bob
